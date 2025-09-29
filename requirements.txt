@@ -1,0 +1,9 @@
+faiss-cpu
+scikit-learn
+numpy
+tqdm
+joblib
+python-dotenv
+langgraph
+langchain-core
+langchain_mistralai
