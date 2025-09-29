@@ -20,5 +20,5 @@ run:
 
 Notes:
 - This is a lightweight, self-contained "langgraph-style" pipeline (no external langgraph dependency).
-- You need to set OPENAI_API_KEY environment variable for the generator step, or adapt LLM call in chatbot.py.
+- You need to set MISTRAL_API_KEY environment variable for the generator step, or adapt LLM call in chatbot.py.
 - Preprocessing will create a folder called `indices/` with files per category.
