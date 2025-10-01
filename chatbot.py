@@ -7,12 +7,13 @@ Nodes: Router -> Retriever -> Generator
 import os
 import json
 import pickle
-from pathlib import Path
 from typing import List, Dict, Any, TypedDict
 
 import faiss
 import joblib
 import numpy as np
+from langchain.prompts import ChatPromptTemplate
+from langchain.output_parsers import StructuredOutputParser, ResponseSchema
 from sklearn.feature_extraction.text import TfidfVectorizer
 from langchain_mistralai import ChatMistralAI
 
@@ -35,11 +36,38 @@ init_state = ChatbotState(
 # Router Node
 class RouterNode:
     def __init__(self, categories=None):
-        self.categories = categories or ["car_insurance", "life_insurance", "travel_insurance"]
+        self.categories = categories or ["car", "life", "travel", "health", "business", "apartment"]
         self.kws = {
-            "car_insurance": ["car_insurance", "vehicle", "collision", "comprehensive", "auto", "windshield", "license"],
-            "life_insurance": ["life", "beneficiary", "death", "term life", "whole life", "premium", "insured"],
-            "travel_insurance": ["travel", "trip", "lost luggage", "cancel", "medical abroad", "flight", "delay"],
+            "car": [
+                "car_insurance", "car", "vehicle", "collision", "comprehensive",
+                "auto", "windshield", "license",
+                "רכב", "ביטוח רכב", "תאונה", "פגיעה", "רישיון", "חלון קדמי", "קניית רכב"
+            ],
+            "life": [
+                "life", "beneficiary", "death", "term life", "whole life",
+                "premium", "insured",
+                "חיים", "ביטוח חיים", "בן/בת זוג", "מוטב", "פוליסת חיים", "מנוי", "תמותה"
+            ],
+            "travel": [
+                "travel", "trip", "lost luggage", "cancel", "medical abroad",
+                "flight", "delay",
+                "נסיעה", "טיול", "ביטול טיסה", "אובדן מטען", "נסיעות", "עזרה רפואית בחו\"ל"
+            ],
+            "apartment": [
+                "apartment", "renters", "tenant", "landlord", "property damage",
+                "fire", "theft", "flood",
+                "דירה", "שוכר", "משכיר", "נזק לרכוש", "שריפה", "גניבה", "צפה"
+            ],
+            "business": [
+                "business", "commercial", "liability", "worker", "professional",
+                "enterprise", "company", "corporate",
+                "עסק", "ביטוח עסק", "אחריות מקצועית", "עובד", "חברה", "מפעל", "משרד", "עסקים"
+            ],
+            "health": [
+                "health", "medical", "hospital", "doctor", "treatment",
+                "surgery", "insurance card", "prescription", "pharmacy",
+                "בריאות", "ביטוח בריאות", "רופא", "בית חולים", "תרופות", "טיפול רפואי", "ניתוח"
+            ]
         }
 
     def __call__(self, state):
@@ -49,8 +77,10 @@ class RouterNode:
             for k in self.kws.get(c, []):
                 if k in q:
                     scores[c] += 1
-        best = max(scores.items(), key=lambda x: x[1])[0]
-        state["category"] = best
+        best_category, best_score = max(scores.items(), key=lambda x: x[1])
+        if best_score < 0.1:
+            best_category = None
+        state["category"] = best_category
         return state
 
 
@@ -76,6 +106,9 @@ class RetrieverNode:
     def __call__(self, state):
         category = state["category"]
         question = state["question"]
+        if category is  None:
+            state["retrieved"] = []
+            return state
         data = self._load_category(category)
         vec: TfidfVectorizer = data["vec"]
         docs_meta = data["docs_meta"]
@@ -114,48 +147,45 @@ class RetrieverNode:
 class GeneratorNode:
     def __init__(self, prompt_path="prompts-version-1.txt", model="mistral-medium"):
         self.prompt_path = prompt_path
-        # Mistral API key must be set in env var
         api_key = os.environ.get("MISTRAL_API_KEY")
         if not api_key:
             raise ValueError("Please set MISTRAL_API_KEY in your environment.")
+        with open(self.prompt_path, "r", encoding="utf-8") as f:
+            self.prompt_txt = f.read()
+
         self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
 
-    def _build_prompt(self, question, retrieved_docs):
-        context = "\n\n---\n\n".join(
-            [f"[{d['doc_id']}]\n{d['text'][:2000]}" for d in retrieved_docs]
-        )
-        with open(self.prompt_path, "r", encoding="utf-8") as f:
-            prompt_txt = f.read()
+        # Define schema for JSON output
+        self.response_schemas = [
+            ResponseSchema(name="answer", description="The main answer to the user's question"),
+            ResponseSchema(name="sources", description="List of document IDs used for the answer", type="list"),
+            ResponseSchema(name="confidence", description="Confidence level in ['low','medium','high']")
+        ]
 
-        instruction = ""
-        if "# instruction:" in prompt_txt:
-            instruction = prompt_txt.split("# instruction:")[1].split("#")[0].strip()
+        self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
 
-        system = instruction
-        user = f"Context:\n{context}\n\nQuestion:\n{question}\n\nFormatting rules: Use JSON as specified."
-        return system, user
-
-    def __call__(self, state):
+    def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
         q = state["question"]
         retrieved = state["retrieved"]
-        system, user = self._build_prompt(q, retrieved)
-
-        resp = self.llm.invoke(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ]
+        context = "\n\n---\n\n".join(
+            [f"[{d['doc_id']}]\n{d['text'][:2000]}" for d in retrieved]
         )
+        format_instruction = self.output_parser.get_format_instructions()
+        messages = [("system", self.prompt_txt)]
+        context_message = f"""##Context:\n{context}"""
+        messages.append(("user", context_message))
+        messages.append(("user", "{user_prompt}"))
 
-        text = resp.content
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = {"answer": text.strip(), "sources": [], "confidence": "low"}
-
+        prompt_template = ChatPromptTemplate.from_messages(
+            messages
+        )
+        prompt = prompt_template.format_prompt(user_prompt=q, format_instructions=format_instruction)
+        # chain = prompt | self.llm | self.output_parser
+        output = self.llm.invoke(prompt)
+        parsed = self.output_parser.parse(output.content)
+        # Store into state
         state["generated"] = parsed
         return state
-
 # Chatbot Graph Wrapper
 class ChatbotGraph:
     def __init__(self, indices_dir="indices"):

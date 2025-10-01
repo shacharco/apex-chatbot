@@ -1,2 +1,7 @@
 .env
 indices/*
+docs/*
+harel_public_information.zip
+harel_public_information/*
+*.xml
+*.iml

@@ -5,5 +5,8 @@ tqdm
 joblib
 python-dotenv
 langgraph
-langchain-core
+langchain
 langchain_mistralai
+PyPDF2
+beautifulsoup4
+lxml

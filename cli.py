@@ -15,7 +15,11 @@ def main():
             break
 
         result = bot.respond(user_input)
-        answer = result.get("generated", "[No answer]")
+        generated = result.get("generated")
+        answer = generated['answer']
+        sources = generated['sources']
+        if sources:
+            answer = f"{answer}\nBased on: {sources}"
         print(f"Bot: {answer}")
 
 
