@@ -8,6 +8,7 @@ import os
 import json
 import pickle
 from typing import List, Dict, Any, TypedDict
+import time
 
 import faiss
 import joblib
@@ -156,14 +157,14 @@ class RetrieverNode:
 
 # Generator Node
 class GeneratorNode:
-    def __init__(self, prompt_path="prompts-version-1.txt", model="mistral-medium"):
+    def __init__(self, prompt_path="prompts-version-1.txt", model="mistral-medium", max_retries=3):
         self.prompt_path = prompt_path
         api_key = os.environ.get("MISTRAL_API_KEY")
         if not api_key:
             raise ValueError("Please set MISTRAL_API_KEY in your environment.")
         with open(self.prompt_path, "r", encoding="utf-8") as f:
             self.prompt_txt = f.read()
-
+        self.max_retries = max_retries
         self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
 
         # Define schema for JSON output
@@ -191,11 +192,18 @@ class GeneratorNode:
             messages
         )
         prompt = prompt_template.format_prompt(user_prompt=q, format_instructions=format_instruction)
-        # chain = prompt | self.llm | self.output_parser
-        output = self.llm.invoke(prompt)
-        parsed = self.output_parser.parse(output.content)
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                output = self.llm.invoke(prompt)
+                parsed = self.output_parser.parse(output.content)
+                state["generated"] = parsed
+                break  # success, exit the retry loop
+            except (ConnectionError, TimeoutError, ValueError) as e:
+                print(f"Attempt {attempt} failed: {e}")
+                if attempt == self.max_retries:
+                    raise  # re-raise the exception after max retries
+                time.sleep(1)
         # Store into state
-        state["generated"] = parsed
         return state
 # Chatbot Graph Wrapper
 class ChatbotGraph:
