@@ -14,8 +14,7 @@ import joblib
 import numpy as np
 from langchain.prompts import ChatPromptTemplate
 from langchain.output_parsers import StructuredOutputParser, ResponseSchema
-from sklearn.feature_extraction.text import TfidfVectorizer
-from langchain_mistralai import ChatMistralAI
+from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 
 from langgraph.graph import StateGraph, END
 
@@ -84,64 +83,76 @@ class RouterNode:
         return state
 
 
-# Retriever Node
 class RetrieverNode:
-    def __init__(self, indices_dir="indices", k=20):
+    def __init__(self, indices_dir="indices", k=20, alpha=0.5):
+        """
+        alpha = weight of TF-IDF score
+        (1-alpha) = weight of semantic similarity
+        """
         self.indices_dir = indices_dir
         self.k = k
+        self.alpha = alpha
         self.loaded = {}
+        self.embedder = MistralAIEmbeddings(model="mistral-embed")
+
 
     def _load_category(self, category):
         if category in self.loaded:
             return self.loaded[category]
+
         base = os.path.join(self.indices_dir, category)
         if not os.path.exists(base):
             raise FileNotFoundError(f"No index for category {category} in {self.indices_dir}")
+
         vec = joblib.load(os.path.join(base, "tfidf_vectorizer.joblib"))
         docs_meta = pickle.load(open(os.path.join(base, "doc_ids.pkl"), "rb"))
         index = faiss.read_index(os.path.join(base, "faiss.index"))
+
         self.loaded[category] = {"vec": vec, "docs_meta": docs_meta, "index": index}
         return self.loaded[category]
 
     def __call__(self, state):
-        category = state["category"]
-        question = state["question"]
-        if category is  None:
+        category = state.get("category")
+        question = state.get("question")
+        if not category or not question:
             state["retrieved"] = []
             return state
-        data = self._load_category(category)
-        vec: TfidfVectorizer = data["vec"]
-        docs_meta = data["docs_meta"]
-        index = data["index"]
 
-        q_vec = vec.transform([question]).astype(np.float32).toarray()
-        qn = q_vec / (np.linalg.norm(q_vec, axis=1, keepdims=True) + 1e-9)
+        data = self._load_category(category)
+        vec, docs_meta, index = data["vec"], data["docs_meta"], data["index"]
+        docs = docs_meta["docs"]
+
+        # 1️⃣ TF-IDF score
+        tfidf_scores = vec.transform([question]).dot(vec.transform(docs).T).toarray()[0]
+        tfidf_scores = tfidf_scores / (np.max(tfidf_scores) + 1e-9)  # normalize 0-1
+
+        # 2️⃣ Semantic embeddings score
+        q_vec = self.embedder.embed_query(question)
+        q_vec = np.array(q_vec).astype("float32").reshape(1, -1)
+        q_norm = np.linalg.norm(q_vec, axis=1, keepdims=True) + 1e-9
+        qn = q_vec / q_norm
         D, I = index.search(qn, self.k)
 
-        results = []
+        sem_scores = np.zeros(len(docs), dtype=np.float32)
         for score, idx in zip(D[0], I[0]):
-            if idx < 0 or idx >= len(docs_meta["docs"]):
-                continue
-            results.append(
-                {"doc_id": docs_meta["doc_ids"][idx], "text": docs_meta["docs"][idx], "score": float(score)}
-            )
+            sem_scores[idx] = score
+        sem_scores = sem_scores / (np.max(sem_scores) + 1e-9)
 
-        # Add TF-IDF top-k
-        tfidf_scores = (vec.transform([question]).dot(vec.transform(docs_meta["docs"]).T)).toarray()[0]
-        top_tfidf_idx = np.argsort(-tfidf_scores)[: self.k]
-        for idx in top_tfidf_idx:
-            if idx < 0 or idx >= len(docs_meta["docs"]):
-                continue
-            did = docs_meta["doc_ids"][idx]
-            if not any(r["doc_id"] == did for r in results):
-                results.append(
-                    {"doc_id": did, "text": docs_meta["docs"][idx], "score": float(tfidf_scores[idx])}
-                )
+        # 3️⃣ Hybrid score
+        final_scores = self.alpha * tfidf_scores + (1 - self.alpha) * sem_scores
 
-        results = sorted(results, key=lambda r: -r["score"])[: self.k]
+        top_idx = np.argsort(-final_scores)[:self.k]
+        results = []
+        for idx in top_idx:
+            results.append({
+                "doc_id": docs_meta["doc_ids"][idx],
+                "text": docs[idx],
+                "title": docs_meta["titles"][idx],
+                "score": float(final_scores[idx])
+            })
+
         state["retrieved"] = results
         return state
-
 
 # Generator Node
 class GeneratorNode:
