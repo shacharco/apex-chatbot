@@ -10,3 +10,4 @@ langchain_mistralai
 PyPDF2
 beautifulsoup4
 lxml
+httpx

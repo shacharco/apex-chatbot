@@ -49,22 +49,38 @@ def precision_recall_f1(pred: str, gold: str):
     f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
     return precision, recall, f1
 
+def sources_percision_recall(pred: List[str], true: str):
+    true = ".".join(true.split(",")[0].strip().split('/')[-1].split('.')[:-1])
+    pred = [p.split(':')[0] for p in pred]
+    pred_set = set(pred)
+    true_set = {true}
+    tp = len(pred_set & true_set)
+    fp = len(pred_set - true_set)
+    fn = len(true_set - pred_set)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    return recall, precision
+
 
 def main():
     bot = ChatbotGraph()  # initialize once
     data = load_validation_data()
     total_p, total_r, total_f1 = 0.0, 0.0, 0.0
+    total_sp, total_sr = 0.0, 0.0
     for q, a_true, s_true in data:
         a_pred, s_pred = run_chatbot(bot, q)
         p, r, f1 = precision_recall_f1(a_pred, a_true)
+        sp, sr = sources_percision_recall(s_pred, s_true)
+        total_sp += sp
+        total_sr += sr
         total_p += p
         total_r += r
         total_f1 += f1
-        print(f"Q: {q}\nPred: {a_pred}\nGold: {a_true}\nP={p:.2f} R={r:.2f} F1={f1:.2f}\n")
+        print(f"Q: {q}\nPred: {a_pred} {s_pred}\nGold: {a_true} {s_true}\nP={p:.2f} R={r:.2f} F1={f1:.2f} SP={sp:.2f} SR={sr:.2f}\n")
         sleep(1)
     n = len(data)
     if n > 0:
-        print(f"AVERAGE Precision={total_p/n:.2f} Recall={total_r/n:.2f} F1={total_f1/n:.2f}")
+        print(f"AVERAGE Precision={total_p/n:.2f} Recall={total_r/n:.2f} F1={total_f1/n:.2f} Precision={total_sp/n:.2f} Recall={total_sr/n:.2f}")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from typing import List, Dict, Any, TypedDict
 import time
 
 import faiss
+import httpx
 import joblib
 import numpy as np
 from langchain.prompts import ChatPromptTemplate
@@ -198,7 +199,7 @@ class GeneratorNode:
                 parsed = self.output_parser.parse(output.content)
                 state["generated"] = parsed
                 break  # success, exit the retry loop
-            except (ConnectionError, TimeoutError, ValueError) as e:
+            except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
                 print(f"Attempt {attempt} failed: {e}")
                 if attempt == self.max_retries:
                     raise  # re-raise the exception after max retries
