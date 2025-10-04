@@ -80,7 +80,7 @@ def main():
         sleep(1)
     n = len(data)
     if n > 0:
-        print(f"AVERAGE Precision={total_p/n:.2f} Recall={total_r/n:.2f} F1={total_f1/n:.2f} Precision={total_sp/n:.2f} Recall={total_sr/n:.2f}")
+        print(f"AVERAGE Precision={total_p/n:.2f} Recall={total_r/n:.2f} F1={total_f1/n:.2f} Sources Precision={total_sp/n:.2f} Sources Recall={total_sr/n:.2f}")
 
 
 if __name__ == "__main__":

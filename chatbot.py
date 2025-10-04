@@ -36,8 +36,26 @@ init_state = ChatbotState(
 
 # Router Node
 class RouterNode:
-    def __init__(self, categories=None):
+    def __init__(self, categories=None, prompt_path="prompts/router/v0.txt", model="mistral-medium", max_retries=3):
+        api_key = os.environ.get("MISTRAL_API_KEY")
+        if not api_key:
+            raise ValueError("Please set MISTRAL_API_KEY in your environment.")
         self.categories = categories or ["car", "life", "travel", "health", "business", "apartment"]
+        self.prompt_path = prompt_path
+        with open(self.prompt_path, "r", encoding="utf-8") as f:
+            self.prompt_txt = f.read()
+        self.max_retries = max_retries
+        self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
+        self.response_schemas = [
+            ResponseSchema(
+                name="route",
+                description=f"One of the following categories: {', '.join(self.categories)}. "
+                            f"If none match, return 'none'.",
+                type="string"
+            )
+        ]
+        self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
+
         self.kws = {
             "car": [
                 "car_insurance", "car", "vehicle", "collision", "comprehensive",
@@ -79,11 +97,32 @@ class RouterNode:
                 if k in q:
                     scores[c] += 1
         best_category, best_score = max(scores.items(), key=lambda x: x[1])
-        if best_score < 0.1:
-            best_category = None
-        state["category"] = best_category
-        return state
+        if best_score >= 0.1:
+            state["category"] = best_category
+            return state
 
+        format_instruction = self.output_parser.get_format_instructions()
+        messages = [("system", self.prompt_txt), ("user", "{user_prompt}")]
+
+        prompt_template = ChatPromptTemplate.from_messages(
+            messages
+        )
+        prompt = prompt_template.format_prompt(user_prompt=q, format_instructions=format_instruction, categories=', '.join(self.categories))
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                output = self.llm.invoke(prompt)
+                parsed = self.output_parser.parse(output.content)
+                best_category = parsed['route']
+                if best_category.lower() == 'none':
+                    best_category = None
+                state["category"] = best_category
+                break  # success, exit the retry loop
+            except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
+                print(f"Attempt {attempt} failed: {e}")
+                if attempt == self.max_retries:
+                    raise  # re-raise the exception after max retries
+                time.sleep(1)
+        return state
 
 class RetrieverNode:
     def __init__(self, indices_dir="indices", k=20, alpha=0.5):
@@ -158,7 +197,7 @@ class RetrieverNode:
 
 # Generator Node
 class GeneratorNode:
-    def __init__(self, prompt_path="prompts-version-1.txt", model="mistral-medium", max_retries=3):
+    def __init__(self, prompt_path="prompts/generator/v0.txt", model="mistral-medium", max_retries=3):
         self.prompt_path = prompt_path
         api_key = os.environ.get("MISTRAL_API_KEY")
         if not api_key:

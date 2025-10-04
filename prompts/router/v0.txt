@@ -1,0 +1,15 @@
+Classify the user question into one of the following categories:
+{categories}.
+If none match, reply with route 'None'.
+
+# few_shot_examples:
+Q: ביטוח עמדת טעינה לרכב מכסה נזק מברק?
+A: route: car
+
+Q: מה סכום ביטוח החיים המקסימלי במקרה של מוות?
+A: route: life
+
+
+# Format Instructions
+follow this format instructions strictly:
+{format_instructions}
