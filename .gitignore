@@ -6,3 +6,4 @@ harel_public_information/*
 *.xml
 *.iml
 .idea/*
+.venv/

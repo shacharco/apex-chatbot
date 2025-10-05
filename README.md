@@ -1,24 +1,101 @@
+# LangGraph-style CLI Chatbot (Python)
 
-LangGraph-style CLI Chatbot (Python)
+## Getting Started
 
+### 1. Clone the Repository
 
-Files:
-- preprocess.py : preprocess documents into FAISS + TF-IDF indices per category
-- chatbot.py : graph-style chatbot implementation (Router -> Retriever -> Generator)
-- cli.py : simple CLI entrypoint
-- prompt-version-1.txt: prompts used by LLM steps (instruction, few-shot, formatting)
-- validation-data.txt : sample validation pairs (q:..., a:...)
-- test_main.py : test runner that computes average precision/recall/F1 (word-overlap-based)
-- requirements.txt : python packages
+```bash
+gh repo clone shacharco/apex-chatbot
+cd apex-chatbot
+```
 
-run:
-1. pip install -r ./requirements
-2. create .env file with MISTRAL_API_KEY=your-mistral-api-key (its free to generate one in their website)
-3. load the .env to you env
-4. run python preprocess.py
-5. run python cli.py
+### 2. Install pyenv
 
-Notes:
+This project uses [pyenv](https://github.com/pyenv/pyenv) to manage Python versions.
+
+```bash
+brew install pyenv
+```
+
+After installation, add pyenv to your shell configuration:
+
+```bash
+# For zsh (default on macOS)
+echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.zshrc
+echo '[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.zshrc
+echo 'eval "$(pyenv init -)"' >> ~/.zshrc
+source ~/.zshrc
+
+# For bash
+echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.bash_profile
+echo '[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.bash_profile
+echo 'eval "$(pyenv init -)"' >> ~/.bash_profile
+source ~/.bash_profile
+```
+
+### 3. Install Python
+
+Install the required Python version (specified in `.python-version`):
+
+```bash
+pyenv install
+```
+
+Verify the correct version is active:
+
+```bash
+python --version
+```
+
+### 4. Create Virtual Environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+### 5. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 6. Configure API Key
+
+Get a free API key from [Mistral AI](https://mistral.ai) and create a `.env` file:
+
+```bash
+echo "MISTRAL_API_KEY=your-mistral-api-key-here" > .env
+```
+
+### 7. Preprocess Documents
+
+Build indices from your documents:
+
+```bash
+python preprocess.py --input_dir docs
+```
+
+### 8. Run the Chatbot
+
+```bash
+python cli.py
+```
+
+Type your questions and type `exit` or `quit` to stop.
+
+## Files
+
+- `preprocess.py` - Preprocess documents into FAISS + TF-IDF indices per category
+- `chatbot.py` - Graph-style chatbot implementation (Router → Retriever → Generator)
+- `cli.py` - Simple CLI entrypoint
+- `prompts/` - Prompts used by LLM steps (instruction, few-shot, formatting)
+- `tests/` - Test runner that computes average precision/recall/F1 (word-overlap-based)
+- `requirements.txt` - Python packages
+- `.python-version` - Required Python version for pyenv
+
+# Notes
+
 - This is a lightweight, self-contained "langgraph-style" pipeline (no external langgraph dependency).
 - You need to set MISTRAL_API_KEY environment variable for the generator step, or adapt LLM call in chatbot.py.
 - Preprocessing will create a folder called `indices/` with files per category.

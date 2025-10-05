@@ -16,11 +16,15 @@ import numpy as np
 from tqdm import tqdm
 import faiss
 from joblib import dump
+from dotenv import load_dotenv
 
 # New deps
 from PyPDF2 import PdfReader
 from bs4 import BeautifulSoup
 from langchain_mistralai import MistralAIEmbeddings
+
+# Load environment variables from .env file
+load_dotenv()
 
 def tokenize_words(text):
     return re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE)
