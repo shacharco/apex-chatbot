@@ -68,15 +68,24 @@ Get a free API key from [Mistral AI](https://mistral.ai) and create a `.env` fil
 echo "MISTRAL_API_KEY=your-mistral-api-key-here" > .env
 ```
 
-### 7. Preprocess Documents
+### 7. Download and Extract Documentation
+
+Download the documentation files from [Google Drive](https://drive.google.com/file/d/17-QhEen1juz9lXoKw0qb6Fffy6edFYhN/view) and extract them to the docs directory:
+
+```bash
+# After downloading harel_public_information.zip to the project root
+unzip harel_public_information.zip
+```
+
+### 8. Preprocess Documents
 
 Build indices from your documents:
 
 ```bash
-python preprocess.py --input_dir docs
+python preprocess.py --input_dir harel_public_information
 ```
 
-### 8. Run the Chatbot
+### 9. Run the Chatbot
 
 ```bash
 python cli.py

@@ -7,3 +7,4 @@ harel_public_information/*
 *.iml
 .idea/*
 .venv/
+__MACOSX/
