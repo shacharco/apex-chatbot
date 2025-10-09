@@ -17,8 +17,12 @@ import numpy as np
 from langchain.prompts import ChatPromptTemplate
 from langchain.output_parsers import StructuredOutputParser, ResponseSchema
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
+from dotenv import load_dotenv
 
 from langgraph.graph import StateGraph, END
+
+# Load environment variables from .env file
+load_dotenv()
 
 class ChatbotState(TypedDict):
     question: str
