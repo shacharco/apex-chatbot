@@ -3,7 +3,7 @@ from chatbot import ChatbotGraph
 
 
 def main():
-    bot = ChatbotGraph()  # initialize once
+    bot = ChatbotGraph(model="claude-3-7-sonnet-latest")  # initialize once
     print("Insurance Chatbot (type 'exit' to quit)")
     while True:
         try:

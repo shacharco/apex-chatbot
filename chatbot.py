@@ -17,7 +17,7 @@ import numpy as np
 from langchain.prompts import ChatPromptTemplate
 from langchain.output_parsers import StructuredOutputParser, ResponseSchema
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
-
+from langchain_anthropic import ChatAnthropic
 from langgraph.graph import StateGraph, END
 from tenacity import RetryError
 
@@ -39,15 +39,18 @@ init_state = ChatbotState(
 # Router Node
 class RouterNode:
     def __init__(self, categories=None, prompt_path="prompts/router/v0.txt", model="mistral-medium", max_retries=5):
-        api_key = os.environ.get("MISTRAL_API_KEY")
+        # api_key = os.environ.get("MISTRAL_API_KEY")
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
-            raise ValueError("Please set MISTRAL_API_KEY in your environment.")
+            raise ValueError("Please set ANTHROPIC_API_KEY in your environment.")
         self.categories = categories or ["car", "life", "travel", "health", "business", "apartment"]
         self.prompt_path = prompt_path
         with open(self.prompt_path, "r", encoding="utf-8") as f:
             self.prompt_txt = f.read()
         self.max_retries = max_retries
-        self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
+        # self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
+        self.llm = ChatAnthropic(model=model, anthropic_api_key=api_key)
+
         self.response_schemas = [
             ResponseSchema(
                 name="routes",
@@ -206,13 +209,15 @@ class RetrieverNode:
 class GeneratorNode:
     def __init__(self, prompt_path="prompts/generator/v0.txt", model="mistral-medium", max_retries=3):
         self.prompt_path = prompt_path
-        api_key = os.environ.get("MISTRAL_API_KEY")
+        # api_key = os.environ.get("MISTRAL_API_KEY")
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
-            raise ValueError("Please set MISTRAL_API_KEY in your environment.")
+            raise ValueError("Please set ANTHROPIC_API_KEY in your environment.")
         with open(self.prompt_path, "r", encoding="utf-8") as f:
             self.prompt_txt = f.read()
         self.max_retries = max_retries
-        self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
+        # self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
+        self.llm = ChatAnthropic(model=model, api_key=api_key, temperature=0.0)
 
         # Define schema for JSON output
         self.response_schemas = [
@@ -227,7 +232,7 @@ class GeneratorNode:
         q = state["question"]
         retrieved = state["retrieved"]
         context = "\n\n---\n\n".join(
-            [f"[{d['doc_id']}]\n{d['text'][:2000]}" for d in retrieved]
+            [f"[{d['doc_id']}]\n{d['text']}" for d in retrieved]
         )
         format_instruction = self.output_parser.get_format_instructions()
         messages = [("system", self.prompt_txt)]
@@ -254,10 +259,10 @@ class GeneratorNode:
         return state
 # Chatbot Graph Wrapper
 class ChatbotGraph:
-    def __init__(self, indices_dir="indices"):
-        router = RouterNode()
+    def __init__(self, indices_dir="indices", model="mistral-medium"):
+        router = RouterNode(model=model)
         retriever = RetrieverNode(indices_dir=indices_dir, k=20)
-        generator = GeneratorNode()
+        generator = GeneratorNode(model=model)
 
         graph = StateGraph(ChatbotState)
         graph.add_node("router", router)

@@ -72,7 +72,7 @@ def categories_percision_recall(pred: List[str], true: str):
 
 
 def main():
-    bot = ChatbotGraph()  # initialize once
+    bot = ChatbotGraph(model="claude-3-7-sonnet-latest")  # initialize once
     data = load_validation_data()
     total_cp, total_cr = 0.0, 0.0
     total_rp, total_rr = 0.0, 0.0
