@@ -19,24 +19,26 @@ from langchain.output_parsers import StructuredOutputParser, ResponseSchema
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 
 from langgraph.graph import StateGraph, END
+from tenacity import RetryError
+
 
 class ChatbotState(TypedDict):
     question: str
-    category: str
+    categories: str
     retrieved: List[str]
     generated: str
 
 
 init_state = ChatbotState(
     question="",
-    category="",
+    categories="",
     retrieved=[],
     generated=""
 )
 
 # Router Node
 class RouterNode:
-    def __init__(self, categories=None, prompt_path="prompts/router/v0.txt", model="mistral-medium", max_retries=3):
+    def __init__(self, categories=None, prompt_path="prompts/router/v0.txt", model="mistral-medium", max_retries=5):
         api_key = os.environ.get("MISTRAL_API_KEY")
         if not api_key:
             raise ValueError("Please set MISTRAL_API_KEY in your environment.")
@@ -48,84 +50,67 @@ class RouterNode:
         self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
         self.response_schemas = [
             ResponseSchema(
-                name="route",
-                description=f"One of the following categories: {', '.join(self.categories)}. "
-                            f"If none match, return 'none'.",
-                type="string"
-            )
+                name="routes",
+                description=(
+                    f"A list of all categories that are relevant or possibly relevant to the input text. "
+                    f"Each element should be one of the following: {', '.join(self.categories)}. "
+                    f"If no categories seem relevant, return an empty list []."
+                ),
+                type="array[string]"
+            ),
+            ResponseSchema(name="explanations",
+                           description="Explanation of why you chose this answer and explanation why you didnt choose other answers. answer only in one line string format.",
+                           type="string")
+
         ]
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
-
         self.kws = {
             "car": [
-                "car_insurance", "car", "vehicle", "collision", "comprehensive",
-                "auto", "windshield", "license",
-                "רכב", "ביטוח רכב", "תאונה", "פגיעה", "רישיון", "חלון קדמי", "קניית רכב"
+                "רכב", "תאונה", "חלון", "דלק"
             ],
             "life": [
-                "life", "beneficiary", "death", "term life", "whole life",
-                "premium", "insured",
-                "חיים", "ביטוח חיים", "בן/בת זוג", "מוטב", "פוליסת חיים", "מנוי", "תמותה"
+                "חיים", "בן/בת זוג", "מוטב", "תמותה"
             ],
             "travel": [
-                "travel", "trip", "lost luggage", "cancel", "medical abroad",
-                "flight", "delay",
-                "נסיעה", "טיול", "ביטול טיסה", "אובדן מטען", "נסיעות", "עזרה רפואית בחו\"ל"
+                "נסיעה", "טיול", "טיסה", "מטען", "נסיעות", "חו\"ל"
             ],
             "apartment": [
-                "apartment", "renters", "tenant", "landlord", "property damage",
-                "fire", "theft", "flood",
-                "דירה", "שוכר", "משכיר", "נזק לרכוש", "שריפה", "גניבה", "צפה"
+                "דירה", "שוכר", "משכיר", "שריפה"
             ],
             "business": [
-                "business", "commercial", "liability", "worker", "professional",
-                "enterprise", "company", "corporate",
-                "עסק", "ביטוח עסק", "אחריות מקצועית", "עובד", "חברה", "מפעל", "משרד", "עסקים"
+                "עסק", "עובד", "חברה", "מפעל", "משרד"
             ],
             "health": [
-                "health", "medical", "hospital", "doctor", "treatment",
-                "surgery", "insurance card", "prescription", "pharmacy",
-                "בריאות", "ביטוח בריאות", "רופא", "בית חולים", "תרופות", "טיפול רפואי", "ניתוח"
+                "בריאות", "רופא", "חולים", "תרופות", "ניתוח"
             ]
         }
 
     def __call__(self, state):
         q = state["question"].lower()
-        scores = {c: 0 for c in self.categories}
-        for c in self.categories:
-            for k in self.kws.get(c, []):
-                if k in q:
-                    scores[c] += 1
-        best_category, best_score = max(scores.items(), key=lambda x: x[1])
-        if best_score >= 0.1:
-            state["category"] = best_category
-            return state
-
         format_instruction = self.output_parser.get_format_instructions()
         messages = [("system", self.prompt_txt), ("user", "{user_prompt}")]
 
         prompt_template = ChatPromptTemplate.from_messages(
             messages
         )
-        prompt = prompt_template.format_prompt(user_prompt=q, format_instructions=format_instruction, categories=', '.join(self.categories))
+        prompt = prompt_template.format_prompt(user_prompt=q, format_instructions=format_instruction,
+                                               categories=', '.join(self.categories), categories_keywords=self.kws)
         for attempt in range(1, self.max_retries + 1):
             try:
                 output = self.llm.invoke(prompt)
                 parsed = self.output_parser.parse(output.content)
-                best_category = parsed['route']
-                if best_category.lower() == 'none':
-                    best_category = None
-                state["category"] = best_category
+                best_categories = parsed['routes']
+                state["categories"] = best_categories
                 break  # success, exit the retry loop
             except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
                 print(f"Attempt {attempt} failed: {e}")
                 if attempt == self.max_retries:
                     raise  # re-raise the exception after max retries
-                time.sleep(1)
+                time.sleep(attempt)
         return state
 
 class RetrieverNode:
-    def __init__(self, indices_dir="indices", k=20, alpha=0.5):
+    def __init__(self, indices_dir="indices", k=5, alpha=0.5, max_retries=5):
         """
         alpha = weight of TF-IDF score
         (1-alpha) = weight of semantic similarity
@@ -133,8 +118,10 @@ class RetrieverNode:
         self.indices_dir = indices_dir
         self.k = k
         self.alpha = alpha
+        self.max_retries = max_retries
         self.loaded = {}
         self.embedder = MistralAIEmbeddings(model="mistral-embed")
+        self.categories = ["car", "life", "travel", "health", "business", "apartment"]
 
 
     def _load_category(self, category):
@@ -153,47 +140,67 @@ class RetrieverNode:
         return self.loaded[category]
 
     def __call__(self, state):
-        category = state.get("category")
+        categories = state.get("categories", [])
         question = state.get("question")
-        if not category or not question:
+        if not question:
             state["retrieved"] = []
             return state
+        if len(categories) == 0:
+            categories = self.categories
+        all_results = []
 
-        data = self._load_category(category)
-        vec, docs_meta, index = data["vec"], data["docs_meta"], data["index"]
-        docs = docs_meta["docs"]
+        # Compute query embedding once
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                q_vec = np.array(self.embedder.embed_query(question)).astype("float32").reshape(1, -1)
+                q_norm = np.linalg.norm(q_vec, axis=1, keepdims=True) + 1e-9
+                qn = q_vec / q_norm
+            except RetryError as e:
+                print(f"Attempt {attempt} failed: {e}")
+                if attempt == self.max_retries:
+                    raise  # re-raise the exception after max retries
+                time.sleep(attempt)
 
-        # 1️⃣ TF-IDF score
-        tfidf_scores = vec.transform([question]).dot(vec.transform(docs).T).toarray()[0]
-        tfidf_scores = tfidf_scores / (np.max(tfidf_scores) + 1e-9)  # normalize 0-1
+        for category in categories:
+            data = self._load_category(category)
+            vec, docs_meta, index = data["vec"], data["docs_meta"], data["index"]
+            docs = docs_meta["docs"]
 
-        # 2️⃣ Semantic embeddings score
-        q_vec = self.embedder.embed_query(question)
-        q_vec = np.array(q_vec).astype("float32").reshape(1, -1)
-        q_norm = np.linalg.norm(q_vec, axis=1, keepdims=True) + 1e-9
-        qn = q_vec / q_norm
-        D, I = index.search(qn, self.k)
+            # --- TF-IDF score ---
+            tfidf_scores = vec.transform([question]).dot(vec.transform(docs).T).toarray()[0]
+            if np.max(tfidf_scores) > 0:
+                tfidf_scores = tfidf_scores / (np.max(tfidf_scores) + 1e-9)
+            else:
+                tfidf_scores = np.zeros_like(tfidf_scores)
 
-        sem_scores = np.zeros(len(docs), dtype=np.float32)
-        for score, idx in zip(D[0], I[0]):
-            sem_scores[idx] = score
-        sem_scores = sem_scores / (np.max(sem_scores) + 1e-9)
+            # --- Semantic embedding score ---
+            D, I = index.search(qn, self.k)
+            sem_scores = np.zeros(len(docs), dtype=np.float32)
+            for score, idx in zip(D[0], I[0]):
+                sem_scores[idx] = score
+            if np.max(sem_scores) > 0:
+                sem_scores = sem_scores / (np.max(sem_scores) + 1e-9)
 
-        # 3️⃣ Hybrid score
-        final_scores = self.alpha * tfidf_scores + (1 - self.alpha) * sem_scores
+            # --- Hybrid score ---
+            final_scores = self.alpha * tfidf_scores + (1 - self.alpha) * sem_scores
 
-        top_idx = np.argsort(-final_scores)[:self.k]
-        results = []
-        for idx in top_idx:
-            results.append({
-                "doc_id": docs_meta["doc_ids"][idx],
-                "text": docs[idx],
-                "title": docs_meta["titles"][idx],
-                "score": float(final_scores[idx])
-            })
+            # --- Collect top results for this category ---
+            top_idx = np.argsort(-final_scores)[:self.k]
+            for idx in top_idx:
+                all_results.append({
+                    "category": category,
+                    "doc_id": docs_meta["doc_ids"][idx],
+                    "text": docs[idx],
+                    "title": docs_meta["titles"][idx],
+                    "score": float(final_scores[idx])
+                })
 
-        state["retrieved"] = results
+        # --- Global top-k across all categories ---
+        all_results = sorted(all_results, key=lambda x: -x["score"])[:self.k]
+
+        state["retrieved"] = all_results
         return state
+
 
 # Generator Node
 class GeneratorNode:
@@ -211,7 +218,7 @@ class GeneratorNode:
         self.response_schemas = [
             ResponseSchema(name="answer", description="The main answer to the user's question"),
             ResponseSchema(name="sources", description="List of document IDs used for the answer", type="list"),
-            ResponseSchema(name="confidence", description="Confidence level in ['low','medium','high']")
+            ResponseSchema(name="explanations", description="Explanation of why you chose this answer and explanation why you didnt choose other answers")
         ]
 
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
@@ -268,7 +275,7 @@ class ChatbotGraph:
         state = ChatbotState(question=question)
         out = self.app.invoke(state)
         return {
-            "category": out["category"],
+            "categories": out["categories"],
             "retrieved": out["retrieved"],
             "generated": out["generated"],
         }

@@ -1,0 +1,5 @@
+summarize the parts of the history provided in the user message that are relevant to the chunk provided next by the user.
+keep the summary under 150 words if possible.
+the summary goal is for giving context to make the chunk embedding better for a RAG application.
+the summary will be prefixed to the chunk before embedding it.
+keep the subjects talked about in the summary, and the description of the chunk if in the history.

@@ -11,3 +11,6 @@ PyPDF2
 beautifulsoup4
 lxml
 httpx
+pdfplumber
+python-bidi
+docling

@@ -1,15 +1,22 @@
-Classify the user question into one of the following categories:
+Classify the user question into all categories that might be relevant from the following list:
 {categories}.
-If none match, reply with route 'None'.
+If none are relevant, reply with an empty list [].
+Prefer including all relevant categories over missing a relevant category.
+
+# Hints
+for every category this words usually means the category is relevant (but not exclusive):
+{categories_keywords}
 
 # few_shot_examples:
 Q: ביטוח עמדת טעינה לרכב מכסה נזק מברק?
-A: route: car
+A: routes: ["car"]
 
 Q: מה סכום ביטוח החיים המקסימלי במקרה של מוות?
-A: route: life
+A: routes: ["life"]
 
+Q: בתור רופא, מה סוגי הביטוח שאני יכול להיות מכוסה בהם?
+A: routes: ["business", "life"]
 
 # Format Instructions
-follow this format instructions strictly:
+Follow these format instructions strictly:
 {format_instructions}

@@ -7,26 +7,33 @@ Usage:
 """
 
 import os
+import time
+
+import pdfplumber
 import argparse
 import re
 import pickle
 from pathlib import Path
+
+from langchain_core.prompts import ChatPromptTemplate
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 from tqdm import tqdm
 import faiss
 from joblib import dump
+from pdfminer.high_level import extract_text
 
 # New deps
 from PyPDF2 import PdfReader
 from bs4 import BeautifulSoup
-from langchain_mistralai import MistralAIEmbeddings
+from langchain_mistralai import MistralAIEmbeddings, ChatMistralAI
+from bidi.algorithm import get_display
 
 def tokenize_words(text):
     return re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE)
 
 
-def chunk_paragraphs(text, target_tokens=300, min_tokens=60, separator="\n\n"):
+def chunk_paragraphs(text, target_tokens=300, min_tokens=150, separator="\n\n"):
     """Split into chunks using separator, then force-break long ones."""
     paras = [p.strip() for p in text.split(separator) if p.strip()]
     chunks, buffer = [], None
@@ -74,7 +81,7 @@ def chunk_paragraphs(text, target_tokens=300, min_tokens=60, separator="\n\n"):
     # Merge too-small chunks
     merged = []
     for c in chunks:
-        if merged and len(tokenize_words(merged[-1])) < min_tokens and len(tokenize_words(c)) < target_tokens * 0.6:
+        if merged and len(tokenize_words(merged[-1])) < min_tokens and len(tokenize_words(c)) < target_tokens * 1.5:
             merged[-1] = merged[-1] + separator + c
         else:
             merged.append(c)
@@ -85,21 +92,6 @@ def read_txt(path):
     text = Path(path).read_text(encoding="utf-8")
     title = path.stem
     return text, title
-
-
-def read_pdf(path):
-    reader = PdfReader(path)
-    texts = []
-    for page in reader.pages:
-        text = page.extract_text()
-        if text:
-            texts.append(text.strip())
-    title = None
-    if reader.metadata and reader.metadata.title:
-        title = str(reader.metadata.title)
-    if not title:
-        title = path.stem
-    return "\n\n".join(texts), title
 
 
 def read_aspx(path):
@@ -115,27 +107,68 @@ def read_aspx(path):
     return text, title
 
 
+
 def load_and_split(path, target_chunk_tokens=300, min_paragraph_tokens=60):
+    """Read and split document into chunks depending on its type."""
     ext = path.suffix.lower()
+
+    # TXT
     if ext == ".txt":
         raw, title = read_txt(path)
-        separator = "\n\n"
+        chunks = chunk_paragraphs(raw, target_tokens=target_chunk_tokens,
+                                  min_tokens=min_paragraph_tokens, separator="\n\n")
+        titles = [title] * len(chunks)
+        return chunks, titles
+
+    # PDF → one chunk per page
     elif ext == ".pdf":
-        raw, title = read_pdf(path)
-        # PDFs usually don’t preserve \n\n well; split by single newline instead
-        separator = "\n"
+        chunks, titles = read_pdf(path)
+        return chunks, titles
+
+    # ASPX / HTML
     elif ext in [".aspx", ".html", ".htm"]:
         raw, title = read_aspx(path)
-        # HTML paragraphs → treat as block splits
-        separator = "\n\n"
+        chunks = chunk_paragraphs(raw, target_tokens=target_chunk_tokens,
+                                  min_tokens=min_paragraph_tokens, separator="\n\n")
+        titles = [title] * len(chunks)
+        return chunks, titles
+
     else:
         return []
 
-    chunks = chunk_paragraphs(raw, target_tokens=target_chunk_tokens,
-                            min_tokens=min_paragraph_tokens, separator=separator)
-    return chunks, [title] * len(chunks)
+from docling.document_converter import DocumentConverter
+# from docling.chunking import HybridChunker
+# from docling.datamodel.document import DoclingDocument
 
+def summarize(history, chunk):
+    messages = [("system", prompt_txt), ("user", "history: {history}"), ("user", "current chunk: {chunk}")]
+    prompt_template = ChatPromptTemplate.from_messages(
+        messages
+    )
+    prompt = prompt_template.format_prompt(history=history, chunk=chunk)
+    for attempt in range(6):
+        try:
+            output = llm.invoke(prompt)
+            return output.content
+        except Exception as e:
+            print(e)
+            if attempt == 5:
+                raise
+            time.sleep(1)
 
+def read_pdf(path: str, min_chars: int = 200,
+                    max_tokens: int = 2000, overlap_tokens: int = 100):
+    # Convert
+    title = Path(path).stem
+    converter = DocumentConverter()
+    converted = converter.convert(path)
+    doc = converted.document            # a DoclingDocument instance
+    markdown = doc.export_to_markdown()
+    chunks = chunk_paragraphs(markdown)
+    for i in range(1, len(chunks)):
+        contextual_chunk = summarize(chunks[i-1], chunks[i])
+        chunks[i] = f"{contextual_chunk}\n\n{chunks[i]}"
+    return chunks, [title for _ in chunks]
 
 def build_indices_for_category(category_dir, out_dir, target_chunk_tokens=300, min_paragraph_tokens=60):
     docs, doc_ids, titles = [], [], []
@@ -144,7 +177,8 @@ def build_indices_for_category(category_dir, out_dir, target_chunk_tokens=300, m
         if path.suffix.lower() in [".txt", ".pdf", ".aspx", ".html", ".htm"]:
             chunks, chunk_titles = load_and_split(path, target_chunk_tokens, min_paragraph_tokens)
             chunks_lens = [len(tokenize_words(chunk)) for chunk in chunks]
-            print(f"chunking {category_dir.name}{path.name} with {len(chunks)} chunks of max size {max(chunks_lens)} and min size {min(chunks_lens)}")
+            print(f"chunking {category_dir.name} {path.name} with {len(chunks)} chunks of max size {max(chunks_lens)} and min size {min(chunks_lens)}")
+            print(chunks_lens)
             for i, (c, t) in enumerate(zip(chunks, chunk_titles)):
                 doc_id = f"{path.stem}::p{i}"
                 doc_with_title = f"{t}\n\n{c}"  # prepend title for context
@@ -163,10 +197,16 @@ def build_indices_for_category(category_dir, out_dir, target_chunk_tokens=300, m
 
     # 2️⃣ Semantic embeddings
     print(f"starting Embeddings for {category_dir.name} with {len(docs)} docs")
-    embedder = MistralAIEmbeddings(model="mistral-embed")
-    embeddings = embedder.embed_documents(docs)
-    embeddings = np.array(embeddings).astype("float32")
-
+    for attempt in range(6):
+        try:
+            embedder = MistralAIEmbeddings(model="mistral-embed")
+            embeddings = embedder.embed_documents(docs)
+            embeddings = np.array(embeddings).astype("float32")
+        except Exception as e:
+            print(e)
+            if attempt == 5:
+                raise
+            time.sleep(1)
     # Normalize semantic embeddings for cosine similarity
     print("normalizing embeddings")
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-9
@@ -195,9 +235,21 @@ if __name__ == "__main__":
     parser.add_argument("--target_chunk_tokens", type=int, default=300)
     parser.add_argument("--min_paragraph_tokens", type=int, default=60)
     args = parser.parse_args()
+    custom_cache = Path(__file__).parent / "hf_cache"
+    os.environ["HF_HOME"] = str(custom_cache)
+    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+    os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+    model = "mistral-medium"
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        raise ValueError("Please set MISTRAL_API_KEY in your environment.")
+    llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
+    with open("prompts/preprocess/v0.txt", "r", encoding="utf-8") as f:
+        prompt_txt = f.read()
 
+    custom_cache.mkdir(exist_ok=True)
     input_dir = Path(args.input_dir)
-    done_categories = []
+    done_categories = ["business", "car"]
     for category_path in input_dir.iterdir():
         if category_path.is_dir() and category_path.name not in done_categories:
             build_indices_for_category(category_path, args.out_dir, args.target_chunk_tokens, args.min_paragraph_tokens)
