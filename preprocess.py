@@ -202,6 +202,7 @@ def build_indices_for_category(category_dir, out_dir, target_chunk_tokens=300, m
             embedder = MistralAIEmbeddings(model="mistral-embed")
             embeddings = embedder.embed_documents(docs)
             embeddings = np.array(embeddings).astype("float32")
+            break
         except Exception as e:
             print(e)
             if attempt == 5:
