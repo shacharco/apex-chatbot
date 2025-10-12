@@ -29,7 +29,7 @@ def load_validation_data(path="tests/validation-data.txt"):
     return pairs
 
 
-def run_chatbot(bot, question: str) -> Tuple[str, List[str], List[str], List[str]]:
+def run_chatbot(bot, question: str) -> Tuple[str, List[str], List[str], List[str], int]:
     result = bot.respond(question)
     # The GeneratorNode returns structured JSON output with "answer"
     generated = result["generated"]
@@ -37,7 +37,8 @@ def run_chatbot(bot, question: str) -> Tuple[str, List[str], List[str], List[str
     sources = generated['sources']
     retrieved = result["retrieved"]
     categories = result["categories"]
-    return answer, sources, retrieved, categories
+    iteration_count = result["iteration_count"]
+    return answer, sources, retrieved, categories, iteration_count
 
 
 def precision_recall_f1(pred: str, gold: str):
@@ -78,6 +79,9 @@ def categories_percision_recall(pred: List[str], true: str):
 
 
 def evaluate_with_ragas(question: str, answer_pred: str, answer_true: str, contexts: List[str]):
+    return {
+        "answer_correctness": [0],
+    }
     data = {
         "question": [question],
         "answer": [answer_pred],
@@ -109,9 +113,10 @@ def main():
     total_p, total_r, total_f1 = 0.0, 0.0, 0.0
     total_sp, total_sr = 0.0, 0.0
     total_ar, total_f, total_ctx_p, total_ctx_r = 0.0, 0.0, 0.0, 0.0
+    iterations = 0
     for q, a_true, s_true in data:
         c_true = s_true.split("/")[0]
-        a_pred, s_pred, r_pred, c_pred = run_chatbot(bot, q)
+        a_pred, s_pred, r_pred, c_pred, iteration_count = run_chatbot(bot, q)
         p, r, f1 = precision_recall_f1(a_pred, a_true)
         sp, sr, sr_index = sources_percision_recall(s_pred, s_true)
         rp, rr, rr_index = sources_percision_recall([doc['doc_id'] for doc in r_pred], s_true)
@@ -132,6 +137,7 @@ def main():
         total_r += r
         total_f1 += f1
         total_ar += ragas_scores["answer_correctness"][0]
+        iterations += iteration_count
         # total_f += ragas_scores["faithfulness"]
         # total_ctx_p += ragas_scores["context_precision"]
         # total_ctx_r += ragas_scores["context_recall"]
@@ -139,7 +145,7 @@ def main():
         print(f"Q: {q}\nPred: {a_pred} {s_pred}\n"
               f"Gold: {a_true} {s_true}\n"
               f"P={p:.2f} R={r:.2f} F1={f1:.2f} SP={sp:.2f} SR={sr:.2f} RP={rp:.2f} RR={rr:.2f} RI={rr_index:.2f} CP={cp:.2f} CR={cr:.2f}\n"
-              f"RAGAS - AC={ragas_scores['answer_correctness'][0]:.2f}\n")
+              f"RAGAS - AC={ragas_scores['answer_correctness'][0]:.2f} Iteration: {iteration_count}\n")
         sleep(1)
     n = len(data)
     if n > 0:
@@ -147,7 +153,9 @@ def main():
               f"\nSources Precision={total_sp/n:.2f} Sources Recall={total_sr/n:.2f}\n"
               f"Retrival Precision={total_rp/n:.2f} Retrival Recall={total_rr/n:.2f}\n"
               f"Categories Precision={total_cp/n:.2f} Categories Recall={total_cr/n:.2f}\n"
-              f"RAGAS AVERAGES - Answer Relevancy={total_ar/n:.2f} Faithfulness={total_f/n:.2f} Context Precision={total_ctx_p/n:.2f} Context Recall={total_ctx_r/n:.2f}")
+              f"RAGAS AVERAGES - Answer Relevancy={total_ar/n:.2f} Faithfulness={total_f/n:.2f} Context Precision={total_ctx_p/n:.2f} Context Recall={total_ctx_r/n:.2f}\n"
+              f"Iteration= {iterations/n:.2f}"
+            )
 
 
 if __name__ == "__main__":

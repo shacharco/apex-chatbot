@@ -18,14 +18,24 @@ Then answer the question based on the information in the documents.
 
 # few_shot_examples:
 Q: ביטוח עמדת טעינה לרכב מכסה נזק מברק?
-A: כן.
+A:
+  "answer": "כן",
+  "sources": ["example-source::p1"],
+  "explanations": "המסמך מציין כי הכיסוי כולל נזק מברק לעמדות טעינה ולכן התשובה חיובית."
+
 
 Q: האם אני יכול לעשות ביטוח מלחמה אם אני מתחת לגיל 18?
-A: לא.
+A:
+  "answer": "לא",
+  "sources": ["example-source::p2"],
+  "explanations": "הפוליסה מגבילה את רכישת הביטוח למבוטחים מעל גיל 18 ולכן לא ניתן לרכוש ביטוח מלחמה במקרה זה."
 
 Q: מה סכום ביטוח החיים המקסימלי במקרה של מוות?
-A: 200,000 שקל.
-Bad Answer: A: 200,000 שקל בתוספת הפרשי הצמדה למדד מהמדד היסודי למדד הידוע ביום תשלום סכום הביטוח.
+A:
+  "answer": "200,000 שקל",
+  "sources": ["example-source::p3"],
+  "explanations": "בפוליסה נקבע כי סכום הביטוח המרבי למקרה מוות הוא 200,000 שקל, ללא הצמדות נוספות."
+Bad Answer: "200,000 שקל בתוספת הפרשי הצמדה למדד מהמדד היסודי למדד הידוע ביום תשלום סכום הביטוח."
 
 # Format Instructions
 follow this format instructions strictly:

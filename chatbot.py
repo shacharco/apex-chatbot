@@ -21,6 +21,14 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from tenacity import RetryError
 
+# Global debug flag
+DEBUG = False
+
+def debug_print(*args, **kwargs):
+    """Print only if DEBUG flag is True"""
+    if DEBUG:
+        print(*args, **kwargs)
+
 
 class ChatbotState(TypedDict):
     question: str
@@ -97,6 +105,9 @@ class RouterNode:
         }
 
     def __call__(self, state):
+        filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved']}
+        debug_print(f"\n[RouterNode.__call__] State: {json.dumps(filtered_state, ensure_ascii=False, indent=2)}")
+
         q = state["question"].lower()
         format_instruction = self.output_parser.get_format_instructions()
         messages = [("system", self.prompt_txt), ("user", "{user_prompt}")]
@@ -109,6 +120,7 @@ class RouterNode:
         for attempt in range(1, self.max_retries + 1):
             try:
                 output = self.llm.invoke(prompt)
+                debug_print(f"[RouterNode] LLM result.content: {output.content}")
                 parsed = self.output_parser.parse(output.content)
                 best_categories = parsed['routes']
                 state["categories"] = best_categories
@@ -117,7 +129,8 @@ class RouterNode:
                         raise ValueError(f"Invalid category '{cat}' returned by the model.")
                 break  # success, exit the retry loop
             except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
-                print(f"Attempt {attempt} failed: {e}")
+                debug_print(f"[RouterNode] Attempt {attempt} failed: {e}")
+                debug_print(f"[RouterNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
                 if attempt == self.max_retries:
                     raise  # re-raise the exception after max retries
                 time.sleep(attempt)
@@ -156,6 +169,9 @@ class RetrieverNode:
         return self.loaded[category]
 
     def __call__(self, state):
+        filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved']}
+        debug_print(f"\n[RetrieverNode.__call__] State: {json.dumps(filtered_state, ensure_ascii=False, indent=2)}")
+
         categories = state.get("categories", []) or self.categories
         question = state.get("question")
         if not question:
@@ -173,9 +189,10 @@ class RetrieverNode:
                 q_vec = np.array(self.embedder.embed_query(question)).astype("float32").reshape(1, -1)
                 q_norm = np.linalg.norm(q_vec, axis=1, keepdims=True) + 1e-9
                 qn = q_vec / q_norm
+                debug_print(f"[RetrieverNode] Embedding computed successfully")
                 break
             except RetryError as e:
-                print(f"Attempt {attempt} failed: {e}")
+                debug_print(f"[RetrieverNode] Attempt {attempt} failed: {e}")
                 if attempt == self.max_retries:
                     raise
                 time.sleep(attempt)
@@ -268,7 +285,7 @@ class GeneratorNode:
 
         # Define schema for JSON output
         self.response_schemas = [
-            ResponseSchema(name="answer", description="The main short final answer to the user's question. yes/no/numeric value with units, no full sentence"),
+            ResponseSchema(name="answer", description="The main short final answer to the user's question as string surrounded with quotes. \"yes\"/\"no\"/\"numeric value with units\", no full sentence"),
             ResponseSchema(name="sources", description="List of document IDs used for the answer", type="list"),
             ResponseSchema(name="explanations", description="Explanation of why you chose this answer and explanation why you didnt choose other answers. answer only in one line string format.", type="string")
         ]
@@ -276,6 +293,9 @@ class GeneratorNode:
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved']}
+        debug_print(f"\n[GeneratorNode.__call__] State: {json.dumps(filtered_state, ensure_ascii=False, indent=2)}")
+
         q = state["question"]
         retrieved = state["retrieved"]
         question_history = state.get("question_history", [])
@@ -312,11 +332,13 @@ class GeneratorNode:
         for attempt in range(1, self.max_retries + 1):
             try:
                 output = self.llm.invoke(prompt)
+                debug_print(f"[GeneratorNode] LLM result.content: {output.content}")
                 parsed = self.output_parser.parse(output.content)
                 state["generated"] = parsed
                 break  # success, exit the retry loop
             except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
-                print(f"Attempt {attempt} failed: {e}")
+                debug_print(f"[GeneratorNode] Attempt {attempt} failed: {e}")
+                debug_print(f"[GeneratorNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
                 if attempt == self.max_retries:
                     raise  # re-raise the exception after max retries
                 time.sleep(1)
@@ -368,6 +390,9 @@ class QualityCheckerNode:
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved']}
+        debug_print(f"\n[QualityCheckerNode.__call__] State: {json.dumps(filtered_state, ensure_ascii=False, indent=2)}")
+
         current_question = state["question"]
         question_history = state.get("question_history", [])
 
@@ -423,6 +448,7 @@ Evaluate if this answer is good enough to answer the ORIGINAL question, or if we
         for attempt in range(1, self.max_retries + 1):
             try:
                 output = self.llm.invoke(prompt)
+                debug_print(f"[QualityCheckerNode] LLM result.content: {output.content}")
                 parsed = self.output_parser.parse(output.content)
 
                 # Store quality check results in state
@@ -446,7 +472,8 @@ Evaluate if this answer is good enough to answer the ORIGINAL question, or if we
 
                 break  # success, exit the retry loop
             except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
-                print(f"Attempt {attempt} failed: {e}")
+                debug_print(f"[QualityCheckerNode] Attempt {attempt} failed: {e}")
+                debug_print(f"[QualityCheckerNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
                 if attempt == self.max_retries:
                     raise  # re-raise the exception after max retries
                 time.sleep(1)
@@ -458,7 +485,7 @@ Evaluate if this answer is good enough to answer the ORIGINAL question, or if we
 class ChatbotGraph:
     def __init__(self, indices_dir="indices", model="mistral-medium"):
         router = RouterNode(model=model)
-        retriever = RetrieverNode(indices_dir=indices_dir, k=10, alpha=0.5)
+        retriever = RetrieverNode(indices_dir=indices_dir, k=20, alpha=0.5)
         generator = GeneratorNode(model=model)
         quality_checker = QualityCheckerNode(model=model)
 
