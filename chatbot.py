@@ -47,17 +47,17 @@ init_state = ChatbotState(
 # Router Node
 class RouterNode:
     def __init__(self, categories=None, prompt_path="prompts/router/v0.txt", model="mistral-medium", max_retries=5):
-        # api_key = os.environ.get("MISTRAL_API_KEY")
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("MISTRAL_API_KEY")
+        # api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("Please set OPENAI_API_KEY in your environment.")
+            raise ValueError("Please set API_KEY in your environment.")
         self.categories = categories or ["car", "life", "travel", "health", "business", "apartment"]
         self.prompt_path = prompt_path
         with open(self.prompt_path, "r", encoding="utf-8") as f:
             self.prompt_txt = f.read()
         self.max_retries = max_retries
-        # self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
-        self.llm = ChatOpenAI(model=model, api_key=api_key)
+        self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
+        # self.llm = ChatOpenAI(model=model, api_key=api_key)
 
         self.response_schemas = [
             ResponseSchema(
@@ -124,13 +124,15 @@ class RouterNode:
         return state
 
 class RetrieverNode:
-    def __init__(self, indices_dir="indices", k=5, alpha=0.5, max_retries=5):
+    def __init__(self, indices_dir="indices", k=10, alpha=0.5, max_retries=5, tfidf_k=30, emb_k=40):
         """
         alpha = weight of TF-IDF score
         (1-alpha) = weight of semantic similarity
         """
         self.indices_dir = indices_dir
         self.k = k
+        self.tfidf_k = tfidf_k
+        self.emb_k = emb_k
         self.alpha = alpha
         self.max_retries = max_retries
         self.loaded = {}
@@ -154,16 +156,18 @@ class RetrieverNode:
         return self.loaded[category]
 
     def __call__(self, state):
-        categories = state.get("categories", [])
+        categories = state.get("categories", []) or self.categories
         question = state.get("question")
         if not question:
             state["retrieved"] = []
             return state
-        if len(categories) == 0:
-            categories = self.categories
-        all_results = []
 
-        # Compute query embedding once
+        # knobs
+        tfidf_k = getattr(self, "tfidf_k", self.tfidf_k)  # candidate pool from TF-IDF
+        embed_pool = getattr(self, "embed_pool", self.emb_k)  # how many NNs we fetch from FAISS to intersect with TF-IDF
+        use_hybrid_in_candidates = getattr(self, "use_hybrid_in_candidates", True)
+
+        # --- compute query embedding once ---
         for attempt in range(1, self.max_retries + 1):
             try:
                 q_vec = np.array(self.embedder.embed_query(question)).astype("float32").reshape(1, -1)
@@ -173,76 +177,100 @@ class RetrieverNode:
             except RetryError as e:
                 print(f"Attempt {attempt} failed: {e}")
                 if attempt == self.max_retries:
-                    raise  # re-raise the exception after max retries
+                    raise
                 time.sleep(attempt)
+
+        all_results = []
 
         for category in categories:
             data = self._load_category(category)
             vec, docs_meta, index = data["vec"], data["docs_meta"], data["index"]
             docs = docs_meta["docs"]
 
-            # --- TF-IDF score ---
-            tfidf_scores = vec.transform([question]).dot(vec.transform(docs).T).toarray()[0]
-            if np.max(tfidf_scores) > 0:
+            # ---------- Stage 1: TF-IDF retrieval ----------
+            # tf-idf over question vs docs
+            doc_matrix = vec.transform(docs)  # cache this in data if possible
+            q_tfidf = vec.transform([question])
+            tfidf_scores = q_tfidf.dot(doc_matrix.T).toarray()[0]
+
+            # pick tfidf top-K candidates
+            if np.any(tfidf_scores):
                 tfidf_scores = tfidf_scores / (np.max(tfidf_scores) + 1e-9)
             else:
                 tfidf_scores = np.zeros_like(tfidf_scores)
+            cand_idx = np.argsort(-tfidf_scores)[:min(tfidf_k, len(docs))]
+            cand_set = set(map(int, cand_idx))
 
-            # --- Semantic embedding score ---
-            D, I = index.search(qn, self.k)
+            # ---------- Stage 2: Embedding scoring on TF-IDF candidates only ----------
+            # We can’t directly “mask” FAISS easily, so we:
+            # 1) fetch a pool of nearest neighbors from FAISS
+            # 2) keep only those that are also in the TF-IDF candidate set
+            #    (others are ignored => embedding score = 0 for non-overlapping docs)
+            D, I = index.search(qn, min(embed_pool, len(docs)))
             sem_scores = np.zeros(len(docs), dtype=np.float32)
+
+            # fill embedding scores only for candidates that appear in the NN pool
             for score, idx in zip(D[0], I[0]):
-                sem_scores[idx] = score
-            if np.max(sem_scores) > 0:
+                if int(idx) in cand_set:
+                    sem_scores[int(idx)] = score
+
+            if np.any(sem_scores):
                 sem_scores = sem_scores / (np.max(sem_scores) + 1e-9)
 
-            # --- Hybrid score ---
-            final_scores = self.alpha * tfidf_scores + (1 - self.alpha) * sem_scores
+            # ---------- Combine within candidates only ----------
+            # We now compute final scores only for the TF-IDF candidate set.
+            if use_hybrid_in_candidates:
+                final_scores = np.zeros(len(docs), dtype=np.float32)
+                final_scores[cand_idx] = (
+                        self.alpha * tfidf_scores[cand_idx] + (1 - self.alpha) * sem_scores[cand_idx]
+                )
+            else:
+                # pure embedding rerank within TF-IDF candidates
+                final_scores = np.zeros(len(docs), dtype=np.float32)
+                final_scores[cand_idx] = sem_scores[cand_idx]
 
-            # --- Collect top results for this category ---
+            # top-k per category
             top_idx = np.argsort(-final_scores)[:self.k]
             for idx in top_idx:
+                if final_scores[idx] <= 0:
+                    continue
                 all_results.append({
                     "category": category,
                     "doc_id": docs_meta["doc_ids"][idx],
                     "text": docs[idx],
                     "title": docs_meta["titles"][idx],
-                    "score": float(final_scores[idx])
+                    "score": float(final_scores[idx]),
                 })
 
-        # --- Global top-k across all categories ---
+        # ---------- Global fuse ----------
         all_results = sorted(all_results, key=lambda x: -x["score"])[:self.k]
-
         state["retrieved"] = all_results
 
-        # Store last context for quality checking
-        context = "\n\n---\n\n".join(
+        state["last_context"] = "\n\n---\n\n".join(
             [f"[{d['doc_id']}]\n{d['text']}" for d in all_results]
         )
-        state["last_context"] = context
-
         return state
 
 
 # Generator Node
 class GeneratorNode:
-    def __init__(self, prompt_path="prompts/generator/v0.txt", model="mistral-medium", max_retries=3):
+    def __init__(self, prompt_path="prompts/generator/v0.txt", model="mistral-medium", max_retries=5):
         self.prompt_path = prompt_path
-        # api_key = os.environ.get("MISTRAL_API_KEY")
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("MISTRAL_API_KEY")
+        # api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("Please set OPENAI_API_KEY in your environment.")
+            raise ValueError("Please set API_KEY in your environment.")
         with open(self.prompt_path, "r", encoding="utf-8") as f:
             self.prompt_txt = f.read()
         self.max_retries = max_retries
-        # self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
-        self.llm = ChatOpenAI(model=model, api_key=api_key, temperature=0.0)
+        self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
+        # self.llm = ChatOpenAI(model=model, api_key=api_key, temperature=0.0)
 
         # Define schema for JSON output
         self.response_schemas = [
             ResponseSchema(name="answer", description="The main short final answer to the user's question. yes/no/numeric value with units, no full sentence"),
             ResponseSchema(name="sources", description="List of document IDs used for the answer", type="list"),
-            ResponseSchema(name="explanations", description="Explanation of why you chose this answer and explanation why you didnt choose other answers")
+            ResponseSchema(name="explanations", description="Explanation of why you chose this answer and explanation why you didnt choose other answers. answer only in one line string format.", type="string")
         ]
 
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
@@ -298,15 +326,17 @@ class GeneratorNode:
 
 # Quality Checker Node
 class QualityCheckerNode:
-    def __init__(self, prompt_path="prompts/quality_checker/v0.txt", model="mistral-medium", max_retries=3):
+    def __init__(self, prompt_path="prompts/quality_checker/v0.txt", model="mistral-medium", max_retries=5):
         self.prompt_path = prompt_path
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("MISTRAL_API_KEY")
+        # api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("Please set OPENAI_API_KEY in your environment.")
+            raise ValueError("Please set API_KEY in your environment.")
         with open(self.prompt_path, "r", encoding="utf-8") as f:
             self.prompt_txt = f.read()
         self.max_retries = max_retries
-        self.llm = ChatOpenAI(model=model, api_key=api_key, temperature=0.0)
+        # self.llm = ChatOpenAI(model=model, api_key=api_key, temperature=0.0)
+        self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
         self.categories = ["car", "life", "travel", "health", "business", "apartment"]
 
         # Define schema for JSON output
@@ -428,7 +458,7 @@ Evaluate if this answer is good enough to answer the ORIGINAL question, or if we
 class ChatbotGraph:
     def __init__(self, indices_dir="indices", model="mistral-medium"):
         router = RouterNode(model=model)
-        retriever = RetrieverNode(indices_dir=indices_dir, k=20, alpha=0.5)
+        retriever = RetrieverNode(indices_dir=indices_dir, k=10, alpha=0.5)
         generator = GeneratorNode(model=model)
         quality_checker = QualityCheckerNode(model=model)
 

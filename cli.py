@@ -3,7 +3,7 @@ from chatbot import ChatbotGraph
 
 
 def main():
-    bot = ChatbotGraph(model="gpt-4.1")  # initialize once
+    bot = ChatbotGraph(model="mistral-medium")  # initialize once
     print("Insurance Chatbot (type 'exit' to quit)")
     while True:
         try:

@@ -102,7 +102,7 @@ def evaluate_with_ragas(question: str, answer_pred: str, answer_true: str, conte
 
 
 def main():
-    bot = ChatbotGraph(model="gpt-4.1")  # initialize once
+    bot = ChatbotGraph(model="mistral-medium")  # initialize once
     data = load_validation_data()
     total_cp, total_cr = 0.0, 0.0
     total_rp, total_rr = 0.0, 0.0
