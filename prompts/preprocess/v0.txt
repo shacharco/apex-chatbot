@@ -1,5 +1,16 @@
-summarize the parts of the history provided in the user message that are relevant to the chunk provided next by the user.
-keep the summary under 150 words if possible.
-the summary goal is for giving context to make the chunk embedding better for a RAG application.
-the summary will be prefixed to the chunk before embedding it.
-keep the subjects talked about in the summary, and the description of the chunk if in the history.
+You have two tasks:
+
+1. EXTRACT KEYWORDS: Extract 5-10 important keywords from the previous chunk (history) that provide context for the current chunk.
+   - Focus on key subjects, entities, technical terms, and important concepts
+   - Examples: "bicycle", "electric", "speed limit", "insurance coverage", "deductible"
+   - Keep them short and focused (1-3 words each)
+   - Return as a comma-separated list
+
+2. SUMMARIZE: Summarize the parts of the history that are relevant to the current chunk.
+   - Keep the summary under 150 words if possible
+   - The summary goal is for giving context to make the chunk embedding better for a RAG application
+   - Keep the subjects talked about in the summary, and the description of the chunk if in the history
+
+Return your response in this EXACT format:
+KEYWORDS: [comma-separated keywords]
+SUMMARY: [your summary here]

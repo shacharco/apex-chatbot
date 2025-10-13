@@ -1,7 +1,7 @@
 # FILE: chatbot.py
 """
 LangGraph-based chatbot pipeline.
-Nodes: Router -> Retriever -> Generator
+Nodes: Router -> Retriever -> DocumentFilter -> Generator -> QualityChecker
 """
 
 import os
@@ -34,6 +34,7 @@ class ChatbotState(TypedDict):
     question: str
     categories: str
     retrieved: List[str]
+    filtered: List[str]  # Filtered documents with sequential context
     generated: str
     iteration_count: int
     question_history: List[str]  # Track all rephrased questions
@@ -45,12 +46,50 @@ init_state = ChatbotState(
     question="",
     categories="",
     retrieved=[],
+    filtered=[],
     generated="",
     iteration_count=0,
     question_history=[],
     last_context="",
     quality_check={}
 )
+
+# Shared Document Loader
+class DocumentLoader:
+    """Shared loader to avoid loading documents multiple times"""
+    def __init__(self, indices_dir="indices"):
+        self.indices_dir = indices_dir
+        self.loaded = {}
+
+    def load_category(self, category):
+        """Load and cache documents for a category"""
+        if category in self.loaded:
+            return self.loaded[category]
+
+        base = os.path.join(self.indices_dir, category)
+        if not os.path.exists(base):
+            raise FileNotFoundError(f"No index for category {category} in {self.indices_dir}")
+
+        vec = joblib.load(os.path.join(base, "tfidf_vectorizer.joblib"))
+        docs_meta = pickle.load(open(os.path.join(base, "doc_ids.pkl"), "rb"))
+        index = faiss.read_index(os.path.join(base, "faiss.index"))
+
+        self.loaded[category] = {"vec": vec, "docs_meta": docs_meta, "index": index}
+        return self.loaded[category]
+
+    def get_all_docs(self):
+        """Get all loaded documents across all categories"""
+        all_docs = {}
+        for category, data in self.loaded.items():
+            docs_meta = data["docs_meta"]
+            for i, doc_id in enumerate(docs_meta["doc_ids"]):
+                all_docs[doc_id] = {
+                    "category": category,
+                    "text": docs_meta["docs"][i],
+                    "title": docs_meta["titles"][i],
+                    "index": i
+                }
+        return all_docs
 
 # Router Node
 class RouterNode:
@@ -129,44 +168,27 @@ class RouterNode:
                         raise ValueError(f"Invalid category '{cat}' returned by the model.")
                 break  # success, exit the retry loop
             except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
-                debug_print(f"[RouterNode] Attempt {attempt} failed: {e}")
-                debug_print(f"[RouterNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
+                print(f"[RouterNode] Attempt {attempt} failed: {e}")
+                print(f"[RouterNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
                 if attempt == self.max_retries:
                     raise  # re-raise the exception after max retries
                 time.sleep(attempt)
         return state
 
 class RetrieverNode:
-    def __init__(self, indices_dir="indices", k=10, alpha=0.5, max_retries=5, tfidf_k=30, emb_k=40):
+    def __init__(self, doc_loader, k=10, alpha=0.5, max_retries=5, tfidf_k=30, emb_k=40):
         """
         alpha = weight of TF-IDF score
         (1-alpha) = weight of semantic similarity
         """
-        self.indices_dir = indices_dir
+        self.doc_loader = doc_loader
         self.k = k
         self.tfidf_k = tfidf_k
         self.emb_k = emb_k
         self.alpha = alpha
         self.max_retries = max_retries
-        self.loaded = {}
         self.embedder = MistralAIEmbeddings(model="mistral-embed")
         self.categories = ["car", "life", "travel", "health", "business", "apartment"]
-
-
-    def _load_category(self, category):
-        if category in self.loaded:
-            return self.loaded[category]
-
-        base = os.path.join(self.indices_dir, category)
-        if not os.path.exists(base):
-            raise FileNotFoundError(f"No index for category {category} in {self.indices_dir}")
-
-        vec = joblib.load(os.path.join(base, "tfidf_vectorizer.joblib"))
-        docs_meta = pickle.load(open(os.path.join(base, "doc_ids.pkl"), "rb"))
-        index = faiss.read_index(os.path.join(base, "faiss.index"))
-
-        self.loaded[category] = {"vec": vec, "docs_meta": docs_meta, "index": index}
-        return self.loaded[category]
 
     def __call__(self, state):
         filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved']}
@@ -192,7 +214,7 @@ class RetrieverNode:
                 debug_print(f"[RetrieverNode] Embedding computed successfully")
                 break
             except RetryError as e:
-                debug_print(f"[RetrieverNode] Attempt {attempt} failed: {e}")
+                print(f"[RetrieverNode] Attempt {attempt} failed: {e}")
                 if attempt == self.max_retries:
                     raise
                 time.sleep(attempt)
@@ -200,7 +222,7 @@ class RetrieverNode:
         all_results = []
 
         for category in categories:
-            data = self._load_category(category)
+            data = self.doc_loader.load_category(category)
             vec, docs_meta, index = data["vec"], data["docs_meta"], data["index"]
             docs = docs_meta["docs"]
 
@@ -269,6 +291,146 @@ class RetrieverNode:
         return state
 
 
+# Document Filter Node
+class DocumentFilterNode:
+    def __init__(self, doc_loader, prompt_path="prompts/document_filter/v0.txt", model="mistral-medium", max_retries=5):
+        self.doc_loader = doc_loader
+        self.prompt_path = prompt_path
+        api_key = os.environ.get("MISTRAL_API_KEY")
+        if not api_key:
+            raise ValueError("Please set API_KEY in your environment.")
+        with open(self.prompt_path, "r", encoding="utf-8") as f:
+            self.prompt_txt = f.read()
+        self.max_retries = max_retries
+        self.llm = ChatMistralAI(model=model, api_key=api_key, temperature=0.0)
+
+        # Define schema for JSON output
+        self.response_schemas = [
+            ResponseSchema(
+                name="relevant_doc_ids",
+                description="List of document IDs that are relevant to answering the question",
+                type="list"
+            ),
+            ResponseSchema(
+                name="explanation",
+                description="Brief explanation of why these documents were selected",
+                type="string"
+            )
+        ]
+
+        self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
+
+    def _get_sequential_docs(self, doc_id, all_docs):
+        """Get previous and next documents from the same source"""
+        sequential_docs = []
+
+        # Parse doc_id to get source and page number
+        if "::" not in doc_id:
+            return sequential_docs
+
+        source, page_part = doc_id.rsplit("::", 1)
+        if not page_part.startswith("p"):
+            return sequential_docs
+
+        try:
+            page_num = int(page_part[1:])
+        except ValueError:
+            return sequential_docs
+
+        # Get previous document
+        prev_doc_id = f"{source}::p{page_num - 1}"
+        if prev_doc_id in all_docs:
+            sequential_docs.append(prev_doc_id)
+
+        # Get next document
+        next_doc_id = f"{source}::p{page_num + 1}"
+        if next_doc_id in all_docs:
+            sequential_docs.append(next_doc_id)
+
+        return sequential_docs
+
+    def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved', 'filtered']}
+        debug_print(f"\n[DocumentFilterNode.__call__] State: {json.dumps(filtered_state, ensure_ascii=False, indent=2)}")
+
+        q = state["question"]
+        retrieved = state["retrieved"]
+
+        if not retrieved:
+            state["filtered"] = []
+            state["last_context"] = ""
+            return state
+
+        # Build context from retrieved documents
+        context = "\n\n---\n\n".join(
+            [f"[{d['doc_id']}]\n{d['text']}" for d in retrieved]
+        )
+
+        format_instruction = self.output_parser.get_format_instructions()
+        messages = [("system", self.prompt_txt)]
+        user_prompt = f"## User Question:\n{q}\n\n## Retrieved Documents:\n{context}\n\n## Your Task:\nIdentify which document IDs are relevant for answering this question."
+        messages.append(("user", user_prompt))
+        messages.append(("user", "{format_instructions}"))
+
+        prompt_template = ChatPromptTemplate.from_messages(messages)
+        prompt = prompt_template.format_prompt(format_instructions=format_instruction)
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                output = self.llm.invoke(prompt)
+                debug_print(f"[DocumentFilterNode] LLM result.content: {output.content}")
+                parsed = self.output_parser.parse(output.content)
+                relevant_doc_ids = parsed.get("relevant_doc_ids", [])
+
+                # Get all loaded documents
+                all_docs = self.doc_loader.get_all_docs()
+
+                # Add sequential documents for each relevant doc
+                expanded_doc_ids = set(relevant_doc_ids)
+                for doc_id in relevant_doc_ids:
+                    sequential = self._get_sequential_docs(doc_id, all_docs)
+                    expanded_doc_ids.update(sequential)
+
+                # Build filtered results with expanded documents
+                filtered_results = []
+                for doc_id in expanded_doc_ids:
+                    # Find in retrieved first
+                    found = False
+                    for doc in retrieved:
+                        if doc["doc_id"] == doc_id:
+                            filtered_results.append(doc)
+                            found = True
+                            break
+
+                    # If not in retrieved, get from all_docs
+                    if not found and doc_id in all_docs:
+                        doc_info = all_docs[doc_id]
+                        filtered_results.append({
+                            "category": doc_info["category"],
+                            "doc_id": doc_id,
+                            "text": doc_info["text"],
+                            "title": doc_info["title"],
+                            "score": 0.5  # Medium score for sequential docs
+                        })
+
+                state["filtered"] = filtered_results
+
+                # Update last_context with filtered documents
+                state["last_context"] = "\n\n---\n\n".join(
+                    [f"[{d['doc_id']}]\n{d['text']}" for d in filtered_results]
+                )
+
+                break  # success, exit the retry loop
+            except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
+                print(f"[DocumentFilterNode] Attempt {attempt} failed: {e}")
+                print(f"[DocumentFilterNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
+                if attempt == self.max_retries:
+                    raise  # re-raise the exception after max retries
+                time.sleep(1)
+
+        return state
+
+
 # Generator Node
 class GeneratorNode:
     def __init__(self, prompt_path="prompts/generator/v0.txt", model="mistral-medium", max_retries=5):
@@ -293,18 +455,18 @@ class GeneratorNode:
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved']}
+        filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved', 'filtered']}
         debug_print(f"\n[GeneratorNode.__call__] State: {json.dumps(filtered_state, ensure_ascii=False, indent=2)}")
 
         q = state["question"]
-        retrieved = state["retrieved"]
+        filtered = state.get("filtered", [])
         question_history = state.get("question_history", [])
         last_context = state.get("last_context", "")
 
-        # Use last_context if available (from retriever), otherwise build from retrieved
+        # Use last_context if available (from filter node), otherwise build from filtered
         if not last_context:
             context = "\n\n---\n\n".join(
-                [f"[{d['doc_id']}]\n{d['text']}" for d in retrieved]
+                [f"[{d['doc_id']}]\n{d['text']}" for d in filtered]
             )
         else:
             context = last_context
@@ -337,8 +499,8 @@ class GeneratorNode:
                 state["generated"] = parsed
                 break  # success, exit the retry loop
             except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
-                debug_print(f"[GeneratorNode] Attempt {attempt} failed: {e}")
-                debug_print(f"[GeneratorNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
+                print(f"[GeneratorNode] Attempt {attempt} failed: {e}")
+                print(f"[GeneratorNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
                 if attempt == self.max_retries:
                     raise  # re-raise the exception after max retries
                 time.sleep(1)
@@ -390,7 +552,7 @@ class QualityCheckerNode:
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
 
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved']}
+        filtered_state = {k: v for k, v in state.items() if k not in ['last_context', 'retrieved', 'filtered']}
         debug_print(f"\n[QualityCheckerNode.__call__] State: {json.dumps(filtered_state, ensure_ascii=False, indent=2)}")
 
         current_question = state["question"]
@@ -402,11 +564,11 @@ class QualityCheckerNode:
         generated = state["generated"]
         answer = generated.get("answer", "")
         sources = generated.get("sources", [])
-        retrieved = state.get("retrieved", [])
+        filtered = state.get("filtered", [])
 
         # Filter context to only include documents cited in sources
         cited_docs = []
-        for doc in retrieved:
+        for doc in filtered:
             doc_id = doc.get("doc_id", "")
             # Check if this doc_id is in the sources list
             if any(doc_id in str(source) for source in sources):
@@ -472,8 +634,8 @@ Evaluate if this answer is good enough to answer the ORIGINAL question, or if we
 
                 break  # success, exit the retry loop
             except (ConnectionError, TimeoutError, ValueError, httpx.HTTPStatusError) as e:
-                debug_print(f"[QualityCheckerNode] Attempt {attempt} failed: {e}")
-                debug_print(f"[QualityCheckerNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
+                print(f"[QualityCheckerNode] Attempt {attempt} failed: {e}")
+                print(f"[QualityCheckerNode] Error - result.content: {output.content if 'output' in locals() else 'N/A'}")
                 if attempt == self.max_retries:
                     raise  # re-raise the exception after max retries
                 time.sleep(1)
@@ -484,14 +646,19 @@ Evaluate if this answer is good enough to answer the ORIGINAL question, or if we
 # Chatbot Graph Wrapper
 class ChatbotGraph:
     def __init__(self, indices_dir="indices", model="mistral-medium"):
+        # Create shared document loader
+        doc_loader = DocumentLoader(indices_dir=indices_dir)
+
         router = RouterNode(model=model)
-        retriever = RetrieverNode(indices_dir=indices_dir, k=20, alpha=0.5)
+        retriever = RetrieverNode(doc_loader=doc_loader, k=20, alpha=0.5)
+        document_filter = DocumentFilterNode(doc_loader=doc_loader, model=model)
         generator = GeneratorNode(model=model)
         quality_checker = QualityCheckerNode(model=model)
 
         graph = StateGraph(ChatbotState)
         graph.add_node("router", router)
         graph.add_node("retriever", retriever)
+        graph.add_node("document_filter", document_filter)
         graph.add_node("generator", generator)
         graph.add_node("quality_checker", quality_checker)
 
@@ -523,7 +690,8 @@ class ChatbotGraph:
         # Set up the graph flow
         graph.set_entry_point("router")
         graph.add_edge("router", "retriever")
-        graph.add_edge("retriever", "generator")
+        graph.add_edge("retriever", "document_filter")
+        graph.add_edge("document_filter", "generator")
         graph.add_edge("generator", "quality_checker")
 
         # Conditional edge from quality_checker
@@ -546,6 +714,7 @@ class ChatbotGraph:
             question=question,
             categories="",
             retrieved=[],
+            filtered=[],
             generated="",
             iteration_count=0,
             question_history=[],
@@ -556,6 +725,7 @@ class ChatbotGraph:
         return {
             "categories": out["categories"],
             "retrieved": out["retrieved"],
+            "filtered": out["filtered"],
             "generated": out["generated"],
             "iteration_count": out.get("iteration_count", 0),
             "quality_check": out.get("quality_check", {}),

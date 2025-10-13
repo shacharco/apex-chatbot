@@ -140,6 +140,22 @@ from docling.document_converter import DocumentConverter
 # from docling.chunking import HybridChunker
 # from docling.datamodel.document import DoclingDocument
 
+def parse_keywords_and_summary(llm_output):
+    """Parse the LLM output to extract keywords and summary"""
+    lines = llm_output.strip().split("\n")
+    keywords = ""
+    summary = ""
+
+    for i, line in enumerate(lines):
+        if line.startswith("KEYWORDS:"):
+            keywords = line.replace("KEYWORDS:", "").strip()
+        elif line.startswith("SUMMARY:"):
+            # Get everything after "SUMMARY:" including multi-line content
+            summary = "\n".join(lines[i:]).replace("SUMMARY:", "").strip()
+            break
+
+    return keywords, summary
+
 def summarize(history, chunk):
     messages = [("system", prompt_txt), ("user", "history: {history}"), ("user", "current chunk: {chunk}")]
     prompt_template = ChatPromptTemplate.from_messages(
@@ -158,6 +174,20 @@ def summarize(history, chunk):
 
 def read_pdf(path: str, min_chars: int = 200,
                     max_tokens: int = 2000, overlap_tokens: int = 100):
+    """
+    Read and chunk a PDF with contextual information.
+
+    Each chunk (after the first) will have the following format:
+    KEYWORDS: <keywords from previous chunk>
+
+    SUMMARY: <summary of previous chunk>
+
+    <<<CONTENT_START>>>
+
+    <actual chunk content>
+
+    To extract only content in postprocessing, split by '<<<CONTENT_START>>>' and take the last part.
+    """
     # Convert
     title = Path(path).stem
     converter = DocumentConverter()
@@ -165,9 +195,19 @@ def read_pdf(path: str, min_chars: int = 200,
     doc = converted.document            # a DoclingDocument instance
     markdown = doc.export_to_markdown()
     chunks = chunk_paragraphs(markdown)
+
+    # Define unique separator
+    SEPARATOR = "<<<CONTENT_START>>>"
+
+    # Process chunks starting from the second one
     for i in range(1, len(chunks)):
-        contextual_chunk = summarize(chunks[i-1], chunks[i])
-        chunks[i] = f"{contextual_chunk}\n\n{chunks[i]}"
+        llm_output = summarize(chunks[i-1], chunks[i])
+        keywords, summary = parse_keywords_and_summary(llm_output)
+
+        # Format: KEYWORDS\nSUMMARY\nSEPARATOR\nCONTENT
+        contextual_prefix = f"KEYWORDS: {keywords}\n\nSUMMARY: {summary}\n\n{SEPARATOR}\n\n"
+        chunks[i] = f"{contextual_prefix}{chunks[i]}"
+
     return chunks, [title for _ in chunks]
 
 def build_indices_for_category(category_dir, out_dir, target_chunk_tokens=300, min_paragraph_tokens=60):
@@ -250,7 +290,7 @@ if __name__ == "__main__":
 
     custom_cache.mkdir(exist_ok=True)
     input_dir = Path(args.input_dir)
-    done_categories = ["business", "car"]
+    done_categories = ["travel"]
     for category_path in input_dir.iterdir():
         if category_path.is_dir() and category_path.name not in done_categories:
             build_indices_for_category(category_path, args.out_dir, args.target_chunk_tokens, args.min_paragraph_tokens)
