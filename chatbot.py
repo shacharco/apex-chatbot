@@ -116,9 +116,9 @@ class RouterNode:
                 ),
                 type="array[string]"
             ),
-            ResponseSchema(name="explanations",
-                           description="Explanation of why you chose this answer and explanation why you didnt choose other answers. answer only in one line string format.",
-                           type="string")
+            # ResponseSchema(name="explanations",
+            #                description="Explanation of why you chose this answer and explanation why you didnt choose other answers. answer only in one line string format.",
+            #                type="string")
 
         ]
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
@@ -311,11 +311,11 @@ class DocumentFilterNode:
                 description="List of document IDs that are relevant to answering the question",
                 type="list"
             ),
-            ResponseSchema(
-                name="explanation",
-                description="Brief explanation of why these documents were selected",
-                type="string"
-            )
+            # ResponseSchema(
+            #     name="explanation",
+            #     description="Brief explanation of why these documents were selected",
+            #     type="string"
+            # )
         ]
 
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
@@ -449,7 +449,7 @@ class GeneratorNode:
         self.response_schemas = [
             ResponseSchema(name="answer", description="The main short final answer to the user's question as string surrounded with quotes. \"yes\"/\"no\"/\"numeric value with units\", no full sentence"),
             ResponseSchema(name="sources", description="List of document IDs used for the answer", type="list"),
-            ResponseSchema(name="explanations", description="Explanation of why you chose this answer and explanation why you didnt choose other answers. answer only in one line string format.", type="string")
+            # ResponseSchema(name="explanations", description="Explanation of why you chose this answer and explanation why you didnt choose other answers. answer only in one line string format.", type="string")
         ]
 
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)
@@ -542,11 +542,11 @@ class QualityCheckerNode:
                     f"If no categories seem relevant, return an empty list [].",
                 type="list"
             ),
-            ResponseSchema(
-                name="explanation",
-                description="Brief explanation of the quality assessment",
-                type="string"
-            )
+            # ResponseSchema(
+            #     name="explanation",
+            #     description="Brief explanation of the quality assessment",
+            #     type="string"
+            # )
         ]
 
         self.output_parser = StructuredOutputParser.from_response_schemas(self.response_schemas)

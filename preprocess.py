@@ -202,10 +202,11 @@ def read_pdf(path: str, min_chars: int = 200,
     # Process chunks starting from the second one
     for i in range(1, len(chunks)):
         llm_output = summarize(chunks[i-1], chunks[i])
-        keywords, summary = parse_keywords_and_summary(llm_output)
+        # keywords, summary = parse_keywords_and_summary(llm_output)
 
         # Format: KEYWORDS\nSUMMARY\nSEPARATOR\nCONTENT
-        contextual_prefix = f"KEYWORDS: {keywords}\n\nSUMMARY: {summary}\n\n{SEPARATOR}\n\n"
+        # contextual_prefix = f"KEYWORDS: {keywords}\n\nSUMMARY: {summary}\n\n{SEPARATOR}\n\n"
+        contextual_prefix = f"{llm_output}\n\n{SEPARATOR}\n\n"
         chunks[i] = f"{contextual_prefix}{chunks[i]}"
 
     return chunks, [title for _ in chunks]
@@ -290,7 +291,7 @@ if __name__ == "__main__":
 
     custom_cache.mkdir(exist_ok=True)
     input_dir = Path(args.input_dir)
-    done_categories = ["travel"]
+    done_categories = ["apartment", "car", "business"]
     for category_path in input_dir.iterdir():
         if category_path.is_dir() and category_path.name not in done_categories:
             build_indices_for_category(category_path, args.out_dir, args.target_chunk_tokens, args.min_paragraph_tokens)

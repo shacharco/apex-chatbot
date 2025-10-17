@@ -6,7 +6,6 @@ from typing import List, Tuple
 from ragas import evaluate
 from ragas.metrics import answer_correctness, answer_relevancy, faithfulness, context_precision, context_recall
 from datasets import Dataset
-from langchain_anthropic import ChatAnthropic
 
 from chatbot import ChatbotGraph
 
